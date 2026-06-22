@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 PKGER-D — package manager for Ubuntu, Linux Mint, and Debian derivatives.
-
 """
 
 import argparse
@@ -105,21 +104,37 @@ def _setup_nuitka_environment():
 
 _setup_nuitka_environment()
 
-try:
+def _require_gtk4():
     import gi
     try:
         gi.require_version("Gtk", "4.0")
-    except Exception:
-        pass
+    except ValueError:
+        print(
+            "Fatal: GTK 4 is required but not installed.\n"
+            "On Linux Mint / Ubuntu / Debian run:\n"
+            "  sudo apt install python3-gi gir1.2-gtk-4.0 libadwaita-1-0 gir1.2-adw-1",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return gi
+
+try:
+    gi = _require_gtk4()
+    from gi.repository import Gtk as Gtk4, Gdk as Gdk4, Gio as Gio4, GObject as GObject4, GLib, Pango
+
+    if Gtk4.get_major_version() != 4:
+        print(
+            f"Fatal: GTK 4 required, but GTK {Gtk4.get_major_version()} was loaded.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    Adw = None
     try:
         gi.require_version("Adw", "1")
-    except Exception:
-        pass
-    from gi.repository import Gtk as Gtk4, Gdk as Gdk4, Gio as Gio4, GObject as GObject4, GLib, Pango
-    try:
         from gi.repository import Adw
-    except Exception:
-        Adw = None
+    except ValueError:
+        log_debug("Libadwaita (Adw) not available — using Gtk fallback widgets")
     GTK4_AVAILABLE = True
 except Exception as e:
     GTK4_AVAILABLE = False
@@ -769,13 +784,6 @@ def _deb_summary(ready, pkg, version, missing, extra_new, conflicts, installed, 
 def build_deb_install_command(deb_path):
     return f"apt-get install -y {shlex.quote(str(Path(deb_path).resolve()))}"
 
-SEVERITY_COLORS = {
-    "security": "#e74c3c",
-    "kernel": "#e67e22",
-    "important": "#3498db",
-    "normal": "#95a5a6",
-}
-
 SEVERITY_LABELS = {
     "security": "🔒 Security",
     "kernel": "⚙ Kernel",
@@ -803,107 +811,172 @@ class PkgerDWindow(Adw.ApplicationWindow if Adw else Gtk4.Window):
         self._active_worker = None
 
         self._setup_ui()
+        self._apply_theme()
         self._apply_css()
         self._setup_shortcuts()
         self._load_initial_data()
 
+    def _apply_theme(self):
+        """Follow system theme (light / dark / high-contrast)."""
+        if Adw:
+            mgr = Adw.StyleManager.get_default()
+            mgr.set_color_scheme(Adw.ColorScheme.DEFAULT)
+        try:
+            settings = Gtk4.Settings.get_default()
+            settings.connect("notify::gtk-theme-name", lambda *_: self._apply_css())
+            settings.connect("notify::gtk-application-prefer-dark-theme", lambda *_: self._apply_css())
+        except Exception:
+            pass
+
     def _apply_css(self):
         css = """
-        .card { background-color: alpha(@theme_bg_color, 0.45); border: 1px solid alpha(@theme_fg_color, 0.08);
-                border-radius: 14px; padding: 16px; transition: all 200ms ease; }
-        .card:hover { border-color: alpha(@accent_color, 0.3); }
-        .dash-card { padding: 10px 12px; border-radius: 10px; min-width: 108px; }
-        .dash-card-title { font-size: 10px; font-weight: 600; letter-spacing: 0.4px;
-                           color: alpha(@theme_fg_color, 0.5); text-transform: uppercase; }
-        .dash-card-value { font-size: 15px; font-weight: 700; margin-top: 2px; }
-        .dash-health-card { padding: 12px 14px; border-radius: 12px; min-width: 120px; }
-        .dash-health-value { font-size: 26px; font-weight: 800; line-height: 1; }
-        .dash-welcome { font-size: 20px; font-weight: 700; }
-        .dash-subtitle { font-size: 12px; }
-        .dash-actions button { padding: 6px 14px; font-size: 12px; border-radius: 20px; }
-        .dash-stats-line { font-size: 11px; padding: 8px 12px; border-radius: 8px;
-                           background: alpha(@theme_fg_color, 0.04); }
-        .card-health { padding: 20px; border-radius: 18px; }
-        .sidebar { background-color: alpha(@theme_bg_color, 0.82);
-                   border-right: 1px solid alpha(@theme_fg_color, 0.06); padding: 6px 0; }
+        /* Surfaces — mix() works in all GTK4 themes (light / dark / HC) */
+        .card {
+            background-color: mix(@theme_bg_color, @theme_fg_color, 0.05);
+            color: @theme_fg_color;
+            border: 1px solid @borders;
+            border-radius: 12px;
+            padding: 14px;
+        }
+        .card:hover { border-color: alpha(@accent_color, 0.45); }
+
+        .sidebar {
+            background-color: mix(@window_bg_color, @theme_fg_color, 0.04);
+            color: @theme_fg_color;
+            border-right: 1px solid @borders;
+            padding: 6px 0;
+            min-width: 0;
+        }
+        .nav-wrap { min-width: 0; }
         .nav-section { font-size: 9px; font-weight: 700; letter-spacing: 1.2px;
-                       color: alpha(@theme_fg_color, 0.38); margin: 10px 14px 4px 14px; }
-        .nav-item { padding: 0; margin: 1px 8px; border-radius: 8px; background: transparent;
-                    border: none; box-shadow: none; min-height: 34px; }
-        .nav-item:hover { background-color: alpha(@theme_fg_color, 0.06); }
-        .nav-item.active { background-color: alpha(@accent_color, 0.14); color: @accent_color; }
-        .nav-item.active .nav-label { font-weight: 700; }
-        .nav-row { padding: 6px 10px; }
-        .nav-label { font-size: 12px; font-weight: 500; }
-        .nav-icon { opacity: 0.85; min-width: 18px; }
-        .nav-item.active .nav-icon { opacity: 1; }
-        .sidebar-brand { padding: 14px 14px 10px 14px; }
-        .sidebar-brand-name { font-size: 15px; font-weight: 800; letter-spacing: 0.6px; }
-        .sidebar-brand-ver { font-size: 10px; opacity: 0.42; margin-top: 1px; }
-        .header-title { font-weight: 700; font-size: 13px; opacity: 0.9; margin-start: 4px; }
+                       color: alpha(@theme_fg_color, 0.45); margin: 8px 10px 3px 10px; }
+        .nav-item { padding: 0; margin: 1px 6px; border-radius: 8px;
+                    background: transparent; border: none; box-shadow: none;
+                    min-height: 30px; }
+        .nav-item:hover { background-color: alpha(@theme_fg_color, 0.08); }
+        .nav-item.active {
+            background-color: alpha(@accent_color, 0.15);
+            color: @accent_color;
+        }
+        .nav-item.active .nav-label { font-weight: 700; color: @accent_color; }
+        .nav-row   { padding: 5px 8px; }
+        .nav-label { font-size: 12px; font-weight: 500; color: @theme_fg_color; }
+        .nav-icon  { opacity: 0.85; min-width: 16px; color: @theme_fg_color; }
+        .nav-item.active .nav-icon { opacity: 1; color: @accent_color; }
+
+        .sidebar-brand { padding: 12px 10px 8px 10px; }
+        .sidebar-brand-name { font-size: 15px; font-weight: 800; letter-spacing: 0.6px;
+                              color: @theme_fg_color; }
+        .sidebar-brand-ver  { font-size: 10px; margin-top: 1px;
+                              color: alpha(@theme_fg_color, 0.55); }
+
+        .status-bar {
+            background-color: @window_bg_color;
+            color: @theme_fg_color;
+            border-top: 1px solid @borders;
+            padding: 6px 14px;
+            font-size: 12px;
+        }
+
+        .header-title { font-weight: 700; font-size: 13px; color: @theme_fg_color; margin-left: 4px; }
         .header-menu-btn { border-radius: 50%; padding: 6px; }
-        .deb-summary-ok { color: #2ecc71; font-weight: 700; font-size: 13px; }
-        .deb-summary-warn { color: #f39c12; font-weight: 700; font-size: 13px; }
-        .deb-summary-error { color: #e74c3c; font-weight: 700; font-size: 13px; }
-        .deb-meta { font-size: 11px; color: alpha(@theme_fg_color, 0.55); }
-        .deb-meta-val { font-size: 12px; font-weight: 600; }
-        .deb-dep-ok { color: #2ecc71; font-size: 11px; font-weight: 600; }
-        .deb-dep-miss { color: #e74c3c; font-size: 11px; font-weight: 600; }
-        .deb-drop-hint { font-size: 12px; opacity: 0.55; padding: 20px; border: 1px dashed alpha(@theme_fg_color, 0.15);
-                         border-radius: 10px; }
-        .nav-btn { padding: 11px 14px; margin: 2px 8px; border-radius: 10px; font-weight: 600; text-align: left; }
-        .nav-btn:hover { background-color: alpha(@theme_fg_color, 0.06); }
-        .nav-btn.active { background-color: @theme_selected_bg_color; color: @theme_selected_fg_color; }
-        .section-title { font-weight: 800; font-size: 15px; }
-        .dim-label { color: alpha(@theme_fg_color, 0.55); font-size: 13px; }
-        .terminal-view { font-family: monospace; font-size: 13px; background-color: #1a1a2e; color: #e0e0e0; padding: 12px; border-radius: 8px; }
-        .status-bar { border-top: 1px solid alpha(@theme_fg_color, 0.08); padding: 6px 14px; font-size: 12px; }
-        .health-excellent { color: #2ecc71; font-weight: 800; }
-        .health-good { color: #3498db; font-weight: 800; }
-        .health-warning { color: #f39c12; font-weight: 800; }
-        .health-critical { color: #e74c3c; font-weight: 800; }
-        .badge-security { background: alpha(#e74c3c, 0.15); color: #e74c3c; border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
-        .badge-kernel { background: alpha(#e67e22, 0.15); color: #e67e22; border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700; }
-        .badge-normal { background: alpha(@theme_fg_color, 0.08); border-radius: 6px; padding: 2px 8px; font-size: 11px; }
+
+        /* Typography */
+        .section-title { font-weight: 800; font-size: 15px; color: @theme_fg_color; }
+        .dim-label     { color: alpha(@theme_fg_color, 0.55); font-size: 13px; }
+
+        /* Dashboard */
+        .dash-card        { padding: 10px 12px; border-radius: 10px; min-width: 108px; }
+        .dash-card-title  { font-size: 10px; font-weight: 600; letter-spacing: 0.4px;
+                            color: alpha(@theme_fg_color, 0.55); text-transform: uppercase; }
+        .dash-card-value  { font-size: 15px; font-weight: 700; color: @theme_fg_color; margin-top: 2px; }
+        .dash-health-card { padding: 12px 14px; border-radius: 12px; min-width: 120px; }
+        .dash-health-value{ font-size: 26px; font-weight: 800; line-height: 1; }
+        .dash-welcome     { font-size: 20px; font-weight: 700; color: @theme_fg_color; }
+        .dash-subtitle    { font-size: 12px; }
+        .dash-actions button { padding: 6px 14px; font-size: 12px; border-radius: 20px; }
+        .dash-stats-line  { font-size: 11px; padding: 8px 12px; border-radius: 8px;
+                            background: alpha(@theme_fg_color, 0.05);
+                            color: alpha(@theme_fg_color, 0.65); }
+
+        /* Semantic colors — adapt to every theme automatically */
+        .health-excellent { color: @success_color;  font-weight: 800; }
+        .health-good      { color: @accent_color;   font-weight: 800; }
+        .health-warning   { color: @warning_color;  font-weight: 800; }
+        .health-critical  { color: @error_color;    font-weight: 800; }
+
+        .badge-security {
+            background: alpha(@error_color, 0.15); color: @error_color;
+            border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700;
+        }
+        .badge-kernel {
+            background: alpha(@warning_color, 0.15); color: @warning_color;
+            border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700;
+        }
+        .badge-normal {
+            background: alpha(@theme_fg_color, 0.08); color: @theme_fg_color;
+            border-radius: 6px; padding: 2px 8px; font-size: 11px;
+        }
+
+        /* DEB installer */
+        .deb-summary-ok    { color: @success_color;  font-weight: 700; font-size: 13px; }
+        .deb-summary-warn  { color: @warning_color;  font-weight: 700; font-size: 13px; }
+        .deb-summary-error { color: @error_color;    font-weight: 700; font-size: 13px; }
+        .deb-meta          { font-size: 11px; color: alpha(@theme_fg_color, 0.55); }
+        .deb-meta-val      { font-size: 12px; font-weight: 600; color: @theme_fg_color; }
+        .deb-dep-ok        { color: @success_color; font-size: 11px; font-weight: 600; }
+        .deb-dep-miss      { color: @error_color;   font-size: 11px; font-weight: 600; }
+        .deb-drop-hint {
+            font-size: 12px; color: alpha(@theme_fg_color, 0.55);
+            padding: 20px; border: 1px dashed @borders; border-radius: 10px;
+        }
+
+        /* Terminal / logs — uses view colors from theme */
+        .terminal-view {
+            font-family: monospace; font-size: 13px;
+            background-color: @view_bg_color;
+            color: @view_fg_color;
+            padding: 12px; border-radius: 8px;
+            border: 1px solid @borders;
+        }
+
         .search-spinner { opacity: 0.7; }
-        .logo-text { font-weight: 900; font-size: 18px; letter-spacing: 1px; }
-        .version-text { font-size: 11px; opacity: 0.5; }
         """
-        provider = Gtk4.CssProvider()
-        provider.load_from_data(css.encode("utf-8"))
+        if getattr(self, "_css_provider", None):
+            try:
+                Gtk4.StyleContext.remove_provider_for_display(
+                    Gdk4.Display.get_default(), self._css_provider,
+                )
+            except Exception:
+                pass
+        self._css_provider = Gtk4.CssProvider()
+        self._css_provider.load_from_data(css.encode("utf-8"))
         Gtk4.StyleContext.add_provider_for_display(
-            Gdk4.Display.get_default(), provider, Gtk4.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            Gdk4.Display.get_default(),
+            self._css_provider,
+            Gtk4.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
     def _setup_ui(self):
-        header = Gtk4.HeaderBar()
-        header.set_show_title_buttons(True)
-        self._build_header_menu(header)
-        self.set_titlebar(header)
-
         body = Gtk4.Box(orientation=Gtk4.Orientation.HORIZONTAL)
         body.set_vexpand(True)
-
-        if Adw:
-            self.toast_overlay = Adw.ToastOverlay()
-            self.toast_overlay.set_child(body)
-            self.set_content(self.toast_overlay)
-        else:
-            self.set_child(body)
-            self.toast_overlay = None
 
         self.sidebar_revealer = Gtk4.Revealer()
         self.sidebar_revealer.set_transition_type(Gtk4.RevealerTransitionType.SLIDE_RIGHT)
         self.sidebar_revealer.set_reveal_child(True)
+        self.sidebar_revealer.set_hexpand(False)
+        self.sidebar_revealer.set_halign(Gtk4.Align.START)
 
         self.sidebar = Gtk4.Box(orientation=Gtk4.Orientation.VERTICAL, spacing=0)
-        self.sidebar.set_size_request(168, -1)
+        self.sidebar.set_hexpand(False)
+        self.sidebar.set_halign(Gtk4.Align.START)
         self.sidebar.add_css_class("sidebar")
         self.sidebar_revealer.set_child(self.sidebar)
         body.append(self.sidebar_revealer)
 
         brand = Gtk4.Box(orientation=Gtk4.Orientation.VERTICAL, spacing=0)
         brand.add_css_class("sidebar-brand")
+        brand.set_halign(Gtk4.Align.START)
         brand_name = Gtk4.Label(label=APP_NAME)
         brand_name.add_css_class("sidebar-brand-name")
         brand_name.set_xalign(0)
@@ -941,7 +1014,12 @@ class PkgerDWindow(Adw.ApplicationWindow if Adw else Gtk4.Window):
         scroll_nav = Gtk4.ScrolledWindow()
         scroll_nav.set_policy(Gtk4.PolicyType.NEVER, Gtk4.PolicyType.AUTOMATIC)
         scroll_nav.set_vexpand(True)
+        scroll_nav.set_hexpand(False)
+        scroll_nav.set_halign(Gtk4.Align.START)
         nav_box = Gtk4.Box(orientation=Gtk4.Orientation.VERTICAL, spacing=0)
+        nav_box.add_css_class("nav-wrap")
+        nav_box.set_halign(Gtk4.Align.START)
+        nav_box.set_hexpand(False)
         scroll_nav.set_child(nav_box)
         self.sidebar.append(scroll_nav)
 
@@ -983,30 +1061,57 @@ class PkgerDWindow(Adw.ApplicationWindow if Adw else Gtk4.Window):
         self.progress_bar.set_show_text(True)
         self.bottom_bar.append(self.progress_bar)
         self.content_area.append(self.bottom_bar)
+
+        header = Adw.HeaderBar() if Adw else Gtk4.HeaderBar()
+        if Adw:
+            header.set_show_start_title_buttons(True)
+            header.set_show_end_title_buttons(True)
+        else:
+            header.set_show_title_buttons(True)
+        self._build_header_menu(header)
+
+        if Adw:
+            toolbar_view = Adw.ToolbarView()
+            toolbar_view.add_top_bar(header)
+            toolbar_view.set_content(body)
+            self.toast_overlay = Adw.ToastOverlay()
+            self.toast_overlay.set_child(toolbar_view)
+            self.set_content(self.toast_overlay)
+        else:
+            self.set_titlebar(header)
+            self.set_child(body)
+            self.toast_overlay = None
+
         self._switch_page("dash")
 
     def _add_nav_section(self, parent, title):
         lbl = Gtk4.Label(label=title)
         lbl.add_css_class("nav-section")
         lbl.set_xalign(0)
+        lbl.set_halign(Gtk4.Align.START)
+        lbl.set_hexpand(False)
         parent.append(lbl)
 
     def _create_nav_item(self, name, label, icon):
-        row = Gtk4.Box(orientation=Gtk4.Orientation.HORIZONTAL, spacing=10)
+        row = Gtk4.Box(orientation=Gtk4.Orientation.HORIZONTAL, spacing=8)
         row.add_css_class("nav-row")
+        row.set_halign(Gtk4.Align.START)
+        row.set_hexpand(False)
         icon_img = Gtk4.Image.new_from_icon_name(icon)
-        icon_img.set_pixel_size(16)
+        icon_img.set_pixel_size(15)
         icon_img.add_css_class("nav-icon")
         text = Gtk4.Label(label=label)
         text.add_css_class("nav-label")
         text.set_xalign(0)
-        text.set_hexpand(True)
+        text.set_hexpand(False)
         row.append(icon_img)
         row.append(text)
 
         btn = Gtk4.Button()
         btn.add_css_class("nav-item")
         btn.set_child(row)
+        btn.set_halign(Gtk4.Align.START)
+        btn.set_hexpand(False)
         btn.set_tooltip_text(label)
         btn.connect("clicked", lambda _x, n=name: self._switch_page(n))
         self.nav_btns[name] = btn
@@ -1052,7 +1157,7 @@ class PkgerDWindow(Adw.ApplicationWindow if Adw else Gtk4.Window):
 
         app_menu = Gio4.Menu()
         app_menu.append("About", "win.about")
-        app_menu.append("Quit", "app.quit")
+        app_menu.append("Quit", "win.quit")
         menu.append_section(None, app_menu)
 
         menu_btn.set_menu_model(menu)
@@ -1066,9 +1171,17 @@ class PkgerDWindow(Adw.ApplicationWindow if Adw else Gtk4.Window):
         self._add_action("upgrade", lambda: self._quick_action("upgrade"))
         self._add_action("clean", lambda: self._quick_action("clean"))
         self._add_action("fix", lambda: self._quick_action("fix"))
+        self._add_action("quit", self._quit_app)
 
     def _toggle_sidebar(self):
         self.sidebar_revealer.set_reveal_child(not self.sidebar_revealer.get_reveal_child())
+
+    def _quit_app(self):
+        app = self.get_application()
+        if app:
+            app.quit()
+        else:
+            self.close()
 
     def _ensure_win_action_group(self):
         if getattr(self, "_win_action_group", None) is not None:
